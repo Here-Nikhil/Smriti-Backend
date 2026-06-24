@@ -12,12 +12,28 @@ import os
 import pickle
 import numpy as np
 import faiss
+from fastembed import TextEmbedding
 from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
 
-# This model runs locally on CPU, no API key needed, ~80MB download.
-# It converts text into a 384-dimensional vector that captures meaning.
-EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
+# fastembed uses ONNX runtime instead of torch -- functionally similar job
+# (turning text into vectors) but with a much smaller memory footprint.
+# This matters specifically for free-tier hosting (e.g. Render's 512MB
+# limit), where torch + sentence-transformers alone could exceed the limit
+# before the app even started serving requests.
+EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"  # 384-dim, comparable quality to MiniLM
+
+# Loaded once, shared across every user's VectorStore. Without this, each
+# new user logging in would trigger its own model download/load -- wasteful,
+# and the root cause of a race condition where multiple simultaneous first-
+# time loads could try reading a model file that wasn't finished downloading.
+_shared_embedding_model = None
+
+
+def get_embedding_model():
+    global _shared_embedding_model
+    if _shared_embedding_model is None:
+        _shared_embedding_model = TextEmbedding(model_name=EMBED_MODEL_NAME)
+    return _shared_embedding_model
 
 CHUNK_SIZE = 800       # characters per chunk (roughly ~150-200 words)
 CHUNK_OVERLAP = 150    # overlap so we don't cut a sentence/idea in half between chunks
@@ -95,16 +111,24 @@ class VectorStore:
     """
 
     def __init__(self):
-        self.model = SentenceTransformer(EMBED_MODEL_NAME, device="cpu")
+        self.model = get_embedding_model()
         self.index = None
         self.chunks = []  # list[Chunk], same order as vectors in self.index
+
+    def _embed(self, texts):
+        """fastembed returns a generator of numpy arrays, not yet normalized.
+        We normalize manually so cosine similarity (via inner product) works
+        the same way it did with sentence-transformers' normalize_embeddings=True."""
+        vectors = np.array(list(self.model.embed(texts)), dtype="float32")
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        norms[norms == 0] = 1  # avoid division by zero on an all-zero vector
+        return vectors / norms
 
     def build(self, chunks):
         """Embed all chunks and build a fresh FAISS index from scratch."""
         self.chunks = chunks
         texts = [c.text for c in chunks]
-        embeddings = self.model.encode(texts, show_progress_bar=False, normalize_embeddings=True)
-        embeddings = np.array(embeddings, dtype="float32")
+        embeddings = self._embed(texts)
 
         dim = embeddings.shape[1]
         # IndexFlatIP = exact search using inner product. Since we normalized
@@ -121,8 +145,7 @@ class VectorStore:
             self.build(new_chunks)
             return
         texts = [c.text for c in new_chunks]
-        embeddings = self.model.encode(texts, show_progress_bar=False, normalize_embeddings=True)
-        embeddings = np.array(embeddings, dtype="float32")
+        embeddings = self._embed(texts)
         self.index.add(embeddings)
         self.chunks.extend(new_chunks)
 
@@ -133,8 +156,7 @@ class VectorStore:
         """
         if self.index is None or self.index.ntotal == 0:
             return []
-        query_vec = self.model.encode([query], normalize_embeddings=True)
-        query_vec = np.array(query_vec, dtype="float32")
+        query_vec = self._embed([query])
         scores, indices = self.index.search(query_vec, k)
         results = []
         for idx, score in zip(indices[0], scores[0]):

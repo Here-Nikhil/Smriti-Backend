@@ -28,10 +28,18 @@ from pydantic import BaseModel
 from groq import Groq
 
 from auth import verify_credentials, create_access_token, get_current_user
-from rag_engine import VectorStore, build_chunks_from_pdfs, format_context_with_citations
+from rag_engine import VectorStore, build_chunks_from_pdfs, format_context_with_citations, get_embedding_model
 from quiz_engine import generate_questions, grade_answer, generate_mcq_questions, grade_mcq_answer
 
 app = FastAPI(title="Smriti API", docs_url=None)
+
+
+@app.on_event("startup")
+def preload_embedding_model():
+    """Downloads/loads the embedding model once, at boot, before the server
+    starts accepting traffic -- avoids the race where a slow first download
+    could overlap with an incoming request trying to use a half-written file."""
+    get_embedding_model()
 
 from fastapi.openapi.docs import get_swagger_ui_html
 
