@@ -35,8 +35,12 @@ def get_embedding_model():
         _shared_embedding_model = TextEmbedding(model_name=EMBED_MODEL_NAME)
     return _shared_embedding_model
 
-CHUNK_SIZE = 800       # characters per chunk (roughly ~150-200 words)
-CHUNK_OVERLAP = 150    # overlap so we don't cut a sentence/idea in half between chunks
+CHUNK_SIZE = 1400      # characters per chunk -- larger chunks mean fewer total
+                        # chunks per PDF, which means fewer embedding computations.
+                        # This matters specifically on slow/free hosting where CPU
+                        # is the bottleneck, not accuracy -- 1400 chars still keeps
+                        # each chunk focused on one idea.
+CHUNK_OVERLAP = 200
 
 
 class Chunk:
